@@ -8,10 +8,12 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict
 from pydantic import BaseModel
 
 from weave.shared.digest import bytes_digest
+from weave.shared.pydantic_util import pydantic_asdict_one_level
 from weave.trace.object_record import ObjectRecord
 from weave.trace.refs import ObjectRef, Ref, TableRef
 from weave.trace.serialization import custom_objs
 from weave.trace.serialization.dictifiable import try_to_dict
+from weave.trace.serialization.serializer import get_serializer_for_obj
 from weave.trace_server.trace_server_interface import (
     FileContentReadReq,
     FileCreateReq,
@@ -21,6 +23,11 @@ from weave.utils.sanitize import REDACTED_VALUE, should_redact
 
 if TYPE_CHECKING:
     from weave.trace.weave_client import WeaveClient
+
+
+def _has_custom_serializer(obj: Any) -> bool:
+    """Check if an object has a custom serializer registered."""
+    return get_serializer_for_obj(obj) is not None
 
 
 def is_pydantic_model_class(obj: Any) -> bool:
@@ -71,18 +78,19 @@ def to_json(
         return {k: to_json(v, project_id, client, use_dictify) for k, v in obj.items()}
     elif is_pydantic_model_class(obj):
         return obj.model_json_schema()
+    elif isinstance(obj, BaseModel) and not _has_custom_serializer(obj):
+        # Generic handler for all Pydantic BaseModel instances that don't have
+        # a custom serializer registered (e.g. Content types).
+        # Uses pydantic_asdict_one_level to extract only declared model fields,
+        # filtering out internal Pydantic attributes (model_fields, etc.) that
+        # would otherwise clutter traces.
+        result: dict[str, Any] = {"_type": obj.__class__.__name__}
+        for k, v in pydantic_asdict_one_level(obj).items():
+            result[k] = to_json(v, project_id, client, use_dictify)
+        return result
 
     if isinstance(obj, (int, float, str, bool)) or obj is None:
         return obj
-
-    # Add explicit handling for WeaveScorerResult models
-    from weave.flow.scorer import WeaveScorerResult
-
-    if isinstance(obj, WeaveScorerResult):
-        return {
-            k: to_json(v, project_id, client, use_dictify)
-            for k, v in obj.model_dump().items()
-        }
 
     # This still blocks potentially on large-file i/o.
     encoded = custom_objs.encode_custom_obj(obj)
@@ -207,6 +215,18 @@ def dictify(
             else:
                 dict_result[k] = dictify(v, maxdepth, depth + 1, seen)
         return dict_result
+    elif isinstance(obj, BaseModel):
+        # Extract only declared Pydantic model fields, avoiding internal
+        # attributes like model_fields, model_computed_fields, etc.
+        pydantic_result: dict[str, Any] = {}
+        for k, v in pydantic_asdict_one_level(obj).items():
+            if isinstance(k, str) and should_redact(k):
+                pydantic_result[k] = REDACTED_VALUE
+            elif maxdepth == 0 or depth < maxdepth:
+                pydantic_result[k] = dictify(v, maxdepth, depth + 1, seen)
+            else:
+                pydantic_result[k] = stringify(v)
+        return pydantic_result
 
     if hasattr(obj, "to_dict"):
         try:

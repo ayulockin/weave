@@ -321,3 +321,110 @@ def test__replace_memory_address() -> None:
     )
     # Test with no memory addresses
     assert _replace_memory_address("No memory address here") == "No memory address here"
+
+
+def test_to_json_pydantic_instance(client) -> None:
+    """Pydantic BaseModel instances should serialize to only declared fields,
+    not internal Pydantic attributes like model_fields, model_computed_fields, etc."""
+
+    class UserPayload(BaseModel):
+        name: str
+        age: int
+        tags: list[str]
+
+    user = UserPayload(name="Alice", age=30, tags=["admin", "user"])
+    project_id = "entity/project"
+    serialized = to_json(user, project_id, client, use_dictify=False)
+
+    assert serialized == {
+        "_type": "UserPayload",
+        "name": "Alice",
+        "age": 30,
+        "tags": ["admin", "user"],
+    }
+
+    # Ensure no internal Pydantic attributes leak through
+    for key in serialized:
+        assert not key.startswith("model_"), f"Internal Pydantic field leaked: {key}"
+
+
+def test_to_json_pydantic_instance_nested(client) -> None:
+    """Nested Pydantic models should each serialize cleanly."""
+
+    class Address(BaseModel):
+        street: str
+        city: str
+
+    class Person(BaseModel):
+        name: str
+        address: Address
+
+    person = Person(name="Bob", address=Address(street="123 Main St", city="Springfield"))
+    project_id = "entity/project"
+    serialized = to_json(person, project_id, client, use_dictify=False)
+
+    assert serialized == {
+        "_type": "Person",
+        "name": "Bob",
+        "address": {
+            "_type": "Address",
+            "street": "123 Main St",
+            "city": "Springfield",
+        },
+    }
+
+
+def test_to_json_pydantic_instance_with_defaults(client) -> None:
+    """Pydantic models with default values should include all declared fields."""
+
+    class Config(BaseModel):
+        debug: bool = False
+        retries: int = 3
+        name: str
+
+    config = Config(name="prod")
+    project_id = "entity/project"
+    serialized = to_json(config, project_id, client, use_dictify=False)
+
+    assert serialized == {
+        "_type": "Config",
+        "debug": False,
+        "retries": 3,
+        "name": "prod",
+    }
+
+
+def test_dictify_pydantic_instance() -> None:
+    """dictify should extract only declared Pydantic fields, not internal attributes."""
+
+    class Item(BaseModel):
+        name: str
+        price: float
+
+    item = Item(name="Widget", price=9.99)
+    result = dictify(item)
+
+    assert result == {
+        "name": "Widget",
+        "price": 9.99,
+    }
+
+    # No internal Pydantic attributes
+    for key in result:
+        assert not key.startswith("model_"), f"Internal Pydantic field leaked: {key}"
+
+
+def test_dictify_pydantic_sanitizes() -> None:
+    """dictify should redact sensitive fields in Pydantic models."""
+
+    class Credentials(BaseModel):
+        username: str
+        api_key: str
+
+    creds = Credentials(username="admin", api_key="sk-secret123")
+    result = dictify(creds)
+
+    assert result == {
+        "username": "admin",
+        "api_key": "REDACTED",
+    }
