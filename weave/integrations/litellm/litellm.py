@@ -58,6 +58,19 @@ def litellm_accumulator(
         acc.choices[delta_choice.index].message.content += (
             delta_choice.delta.content or ""
         )
+
+        delta_reasoning_content = getattr(delta_choice.delta, "reasoning_content", None)
+        if isinstance(delta_reasoning_content, str) and delta_reasoning_content:
+            msg = acc.choices[delta_choice.index].message
+            # `reasoning_content` is optional and may be unset on the accumulated message.
+            if getattr(msg, "reasoning_content", None) is None:
+                try:
+                    msg.reasoning_content = ""  # type: ignore[attr-defined]
+                except Exception:
+                    # If the Message type does not support reasoning_content, skip.
+                    pass
+            if getattr(msg, "reasoning_content", None) is not None:
+                msg.reasoning_content += delta_reasoning_content  # type: ignore[attr-defined]
         if delta_choice.delta.tool_calls:
             if acc.choices[delta_choice.index].message.tool_calls is None:
                 acc.choices[delta_choice.index].message.tool_calls = []
