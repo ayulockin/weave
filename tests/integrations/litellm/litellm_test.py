@@ -5,10 +5,11 @@ from typing import Any
 
 import litellm
 import pytest
+from litellm.utils import Delta, ModelResponse, StreamingChoices, Usage
 from packaging.version import parse as version_parse
 
 import weave
-from weave.integrations.litellm.litellm import get_litellm_patcher
+from weave.integrations.litellm.litellm import get_litellm_patcher, litellm_accumulator
 from weave.integrations.openai.openai_sdk import get_openai_patcher
 
 # This PR:
@@ -280,3 +281,95 @@ def test_model_predict(
     assert d["prompt_tokens_details"]["cached_tokens"] == 0
     assert d["completion_tokens"] == 10
     assert d["total_tokens"] == 38
+
+
+def _make_streaming_chunk(
+    chunk_id: str,
+    model: str,
+    content: str | None = None,
+    reasoning_content: str | None = None,
+    role: str | None = None,
+    finish_reason: str | None = None,
+    choice_index: int = 0,
+) -> ModelResponse:
+    """Helper to create a streaming ModelResponse chunk for accumulator tests."""
+    delta_kwargs: dict[str, Any] = {}
+    if content is not None:
+        delta_kwargs["content"] = content
+    if reasoning_content is not None:
+        delta_kwargs["reasoning_content"] = reasoning_content
+    if role is not None:
+        delta_kwargs["role"] = role
+
+    return ModelResponse(
+        id=chunk_id,
+        object="chat.completion.chunk",
+        created=1234567890,
+        model=model,
+        choices=[
+            StreamingChoices(
+                index=choice_index,
+                delta=Delta(**delta_kwargs),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=Usage(prompt_tokens=0, total_tokens=0, completion_tokens=None),
+    )
+
+
+def test_litellm_accumulator_reasoning_content() -> None:
+    """Test that reasoning_content from streaming deltas is accumulated correctly."""
+    chunks = [
+        _make_streaming_chunk("id1", "deepseek-r1", role="assistant", reasoning_content="Let me "),
+        _make_streaming_chunk("id1", "deepseek-r1", reasoning_content="think about "),
+        _make_streaming_chunk("id1", "deepseek-r1", reasoning_content="this..."),
+        _make_streaming_chunk("id1", "deepseek-r1", content="The answer is 4."),
+        _make_streaming_chunk("id1", "deepseek-r1", finish_reason="stop"),
+    ]
+
+    acc = None
+    for chunk in chunks:
+        acc = litellm_accumulator(acc, chunk)
+
+    assert acc is not None
+    assert len(acc.choices) == 1
+    assert acc.choices[0].message.content == "The answer is 4."
+    assert hasattr(acc.choices[0].message, "reasoning_content")
+    assert acc.choices[0].message.reasoning_content == "Let me think about this..."
+    assert acc.choices[0].finish_reason == "stop"
+
+
+def test_litellm_accumulator_reasoning_content_interleaved_with_content() -> None:
+    """Test accumulation when reasoning_content and content arrive in the same chunks."""
+    chunks = [
+        _make_streaming_chunk("id1", "deepseek-r1", role="assistant", reasoning_content="Step 1: ", content=""),
+        _make_streaming_chunk("id1", "deepseek-r1", reasoning_content="2+2=4", content="The "),
+        _make_streaming_chunk("id1", "deepseek-r1", content="answer is 4."),
+        _make_streaming_chunk("id1", "deepseek-r1", finish_reason="stop"),
+    ]
+
+    acc = None
+    for chunk in chunks:
+        acc = litellm_accumulator(acc, chunk)
+
+    assert acc is not None
+    assert acc.choices[0].message.content == "The answer is 4."
+    assert acc.choices[0].message.reasoning_content == "Step 1: 2+2=4"
+
+
+def test_litellm_accumulator_no_reasoning_content() -> None:
+    """Test that the accumulator works correctly when no reasoning_content is present."""
+    chunks = [
+        _make_streaming_chunk("id1", "gpt-4", role="assistant", content="Hello "),
+        _make_streaming_chunk("id1", "gpt-4", content="world!"),
+        _make_streaming_chunk("id1", "gpt-4", finish_reason="stop"),
+    ]
+
+    acc = None
+    for chunk in chunks:
+        acc = litellm_accumulator(acc, chunk)
+
+    assert acc is not None
+    assert acc.choices[0].message.content == "Hello world!"
+    # reasoning_content should not be set when no reasoning chunks were received
+    assert not hasattr(acc.choices[0].message, "reasoning_content")
