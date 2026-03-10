@@ -819,13 +819,15 @@ async def test_eval_with_complex_types(client):
     row = dataset.rows[0]
 
     assert isinstance(row["image"], Image.Image)
-    # Very SAD: Datasets do not resursively save objects
-    # So this assertion is checking current state, but not
-    # the correct behavior of the dataset (the should be the
-    # MyDataclass, MyModel, and MyObj)
-    assert isinstance(row["dc"], str)  #  MyDataclass
-    assert isinstance(row["model"], str)  # MyModel
-    assert isinstance(row["obj"], str)  # MyObj
+    # Datasets do not recursively save objects, so dataclasses
+    # still fall through to string representation. However,
+    # Pydantic BaseModel instances are now properly serialized
+    # to their declared fields (via pydantic_asdict_one_level),
+    # so they round-trip as ObjectRecords/WeaveObjects rather
+    # than opaque repr() strings.
+    assert isinstance(row["dc"], str)  #  MyDataclass (no special handling)
+    assert not isinstance(row["model"], str)  # MyModel: now properly serialized
+    assert not isinstance(row["obj"], str)  # MyObj: weave.Object subclass
     assert isinstance(row["text"], str)
 
     access_log = client.server.attribute_access_log
