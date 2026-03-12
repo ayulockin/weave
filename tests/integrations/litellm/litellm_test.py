@@ -6,8 +6,10 @@ from typing import Any
 import litellm
 import pytest
 from packaging.version import parse as version_parse
+from litellm.utils import Choices, Message, ModelResponse
 
 import weave
+from weave.integrations.litellm.litellm import litellm_accumulator
 from weave.integrations.litellm.litellm import get_litellm_patcher
 from weave.integrations.openai.openai_sdk import get_openai_patcher
 
@@ -280,3 +282,45 @@ def test_model_predict(
     assert d["prompt_tokens_details"]["cached_tokens"] == 0
     assert d["completion_tokens"] == 10
     assert d["total_tokens"] == 38
+
+
+def test_litellm_accumulator_accumulates_reasoning_content() -> None:
+    acc = None
+
+    chunk1 = ModelResponse(
+        id="1",
+        object="chat.completion.chunk",
+        created=0,
+        model="m",
+        choices=[
+            Choices(
+                index=0,
+                delta=Message(
+                    role="assistant", content="Hello", reasoning_content="think-1"
+                ),
+                finish_reason=None,
+            )
+        ],
+    )
+    chunk2 = ModelResponse(
+        id="1",
+        object="chat.completion.chunk",
+        created=0,
+        model="m",
+        choices=[
+            Choices(
+                index=0,
+                delta=Message(
+                    role=None, content=" world", reasoning_content="think-2"
+                ),
+                finish_reason="stop",
+            )
+        ],
+    )
+
+    acc = litellm_accumulator(acc, chunk1)
+    acc = litellm_accumulator(acc, chunk2)
+
+    assert acc.choices[0].message.content == "Hello world"
+    assert acc.choices[0].message.reasoning_content == "think-1think-2"
+    assert acc.choices[0].finish_reason == "stop"
